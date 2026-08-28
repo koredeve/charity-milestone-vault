@@ -92,6 +92,7 @@ class Project:
 
 class CharityMilestoneVault(gl.Contract):
 	owner_addr: Address
+	approved_projects: TreeMap[str, bool]
 	projects: TreeMap[str, Project]
 	donations: TreeMap[str, u256]
 	donors: TreeMap[str, DynArray[str]]
@@ -127,6 +128,9 @@ class CharityMilestoneVault(gl.Contract):
 		if pid in self.projects:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Project id already exists")
 		milestones_list = list(milestones)
+		# New projects start UNVERIFIED: donations and evidence unlock only
+		# after the platform owner vets the organization.
+		self.approved_projects[pid] = False
 		self.projects[pid] = Project(
 			creator=gl.message.sender_address,
 			name=name,
@@ -140,11 +144,24 @@ class CharityMilestoneVault(gl.Contract):
 		)
 		self.project_ids.append(pid)
 
+	@gl.public.write
+	def approve_project(self, pid: str) -> None:
+		if gl.message.sender_address != self.owner_addr:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Only the platform owner may vet projects")
+		self._get_project(pid)
+		self.approved_projects[pid] = True
+
+	@gl.public.view
+	def is_project_approved(self, pid: str) -> bool:
+		return self.approved_projects.get(str(pid), False)
+
 	@gl.public.write.payable
 	def donate(self, pid: str) -> None:
 		project = self._get_project(pid)
 		if project.status != STATUS_ACTIVE:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Project is not accepting donations")
+		if not self.approved_projects.get(str(pid), False):
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Project is pending owner verification")
 		if gl.message.value == u256(0):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Send value with the call")
 		donor_key = pid + ":" + str(gl.message.sender_address)
@@ -173,19 +190,26 @@ class CharityMilestoneVault(gl.Contract):
 
 	@gl.public.write
 	def submit_evidence(self, pid: str, idx: u256, evidence_url: str, narrative: str) -> None:
+		if not self.approved_projects.get(str(pid), False):
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Project is pending owner verification")
 		idx_i = int(idx)
 		project = self._check_milestone_action(pid, idx_i)
-		self.evidence[pid + ":" + str(idx_i)] = evidence_url + "||" + narrative
+		url = str(evidence_url).strip()
+		if not url.startswith("https://"):
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Evidence URL must start with https://")
+		self.evidence[pid + ":" + str(idx_i)] = url + "||" + str(narrative)
 
 	@gl.public.write
 	def verify_milestone(self, pid: str, idx: u256) -> None:
 		idx_i = int(idx)
 		project = self._check_milestone_action(pid, idx_i)
+		payout = project.payout_per_milestone_atto
+		if project.raised_atto < project.released_atto + payout:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Insufficient donations raised for milestone payout")
 		evidence_payload = self.evidence.get(pid + ":" + str(idx_i))
 		if evidence_payload is None:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} No evidence submitted for this milestone")
 		milestone_text = str(project.milestones[idx_i])
-		payout = project.payout_per_milestone_atto
 
 		def leader_fn() -> dict:
 			url, narrative = evidence_payload.split("||", 1)

@@ -24,6 +24,7 @@ def _create_project(direct_vm, contract, creator, pid="proj-1"):
     contract.create_project(
         pid, "Clean Water", "Build wells in two villages", MILESTONES, PAYOUT
     )
+    contract.approve_project(pid)
 
 
 def _donate(direct_vm, contract, donor, pid, amount):
@@ -240,3 +241,33 @@ def test_non_creator_cannot_cancel_and_unknown_id_reverts(direct_vm, direct_depl
 
     assert contract.get_project("proj-1")["status"] == "active"
     assert contract.total_projects() == 1
+
+
+def test_unvetted_project_rejects_donations_and_evidence(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """New projects need owner vetting before donations or evidence."""
+    contract = _deploy(direct_vm, direct_deploy, direct_alice)
+    direct_vm.sender = direct_alice
+    contract.create_project("p-vet", "Unvetted charity", "desc", ["milestone one"], 5 * 10**18)
+
+    assert contract.is_project_approved("p-vet") is False
+    with direct_vm.expect_revert("pending owner verification"):
+        contract.donate("p-vet")
+    with direct_vm.expect_revert("pending owner verification"):
+        contract.submit_evidence("p-vet", 0, "https://evidence.example.org/x", "narrative")
+
+    contract.approve_project("p-vet")
+    assert contract.is_project_approved("p-vet") is True
+    direct_vm.value = 1 * 10**18
+    contract.donate("p-vet")
+    direct_vm.value = 0
+    assert contract.get_project("p-vet")["raised_atto"] == 1 * 10**18
+
+
+def test_project_vetting_is_owner_only(direct_vm, direct_deploy, direct_alice, direct_bob):
+    """Only the platform owner can vet projects; unknown ids revert."""
+    contract = _deploy(direct_vm, direct_deploy, direct_alice)
+    with direct_vm.prank(direct_bob):
+        with direct_vm.expect_revert("Only the platform owner"):
+            contract.approve_project("missing")
+    with direct_vm.expect_revert("Unknown project id"):
+        contract.approve_project("missing")
